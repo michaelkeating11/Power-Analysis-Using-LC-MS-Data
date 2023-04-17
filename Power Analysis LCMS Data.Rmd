@@ -1,0 +1,190 @@
+---
+title: 'Performing a Power Analysis to estimate sample size requirements for an LC-MS Study'
+author: "Michael Keating"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+  keep_MD: TRUE
+df_print: paged
+
+---
+* Data is publicly available at https://www.metaboanalyst.ca/MetaboAnalyst/upload/StatUploadView.xhtml
+* LCMS analysis of 12 mice spinal cord samples. 6 knock-out samples and 6 wild-type samples
+
+
+```{r setup-chunk, include=FALSE}
+knitr::opts_chunk$set(
+  cache = FALSE,
+  dev = "png",
+  dpi = 300
+)
+```
+
+Load the packages that will be used to perform the analysis
+
+```{r, Package Loading, echo=T,results=T,warning=F,message=F}
+pacman::p_load(htmlTable,ggplot2,matrixStats,effsize,pwr,dplyr,gtools,coin,rlist)
+
+```
+
+Load in the data and view number of samples
+```{r, Import and Explore Data, echo=T,results=T,warning=F}
+
+data<-read.csv("lcms_table.csv")
+
+htmlTable(head(data), css.cell = "padding-left: 3px; padding-right: 3px;text-align:center;", 
+          colWidths = "70px", align = "c", rnames = FALSE, 
+          caption = "", 
+          css.table = "width:100%; white-space: nowrap; overflow-x: auto;")
+
+```
+
+We can see the data has the variables (m/z's) in the rows and the samples in columns. While we can work with this, generally we want to have our samples as rows and variables as columns. Easy fix by transposing and relabeling
+
+```{r, Organize data for analyses, echo=T,results=T}
+
+t_data<-data.frame(t(data))
+colnames(t_data)<-(t_data[1,])
+t_data<-t_data[-1,]
+
+htmlTable(head(t_data[,1:6]), css.cell = "padding-left: 3px; padding-right: 3px; text-align:center;", 
+          colWidths = "30px", align = "c", rnames = FALSE, 
+          caption = "", 
+          css.table = "width:100%; white-space: nowrap; overflow-x: auto;")
+
+
+```
+
+```{r, Convert data formats from character to either factor for our class label or numeric for our continuous intensities, results=F,echo=F}
+
+t_data$Label<-as.factor(t_data$Label)
+
+# identify character columns
+char_cols <- sapply(t_data, is.character)
+
+# convert character columns to numeric
+t_data[char_cols] <- apply(t_data[char_cols], 2, as.numeric)
+
+```
+
+
+Now that we have our data in a tidy format we can start to analyze it properly. Let's start by checking how the distribution of intensities for some of our m/z values varies between groups
+
+```{r, Plot intensity distribution of m/z values, echo=T,results=T}
+
+ggplot(t_data, aes(x = `200.1/2926`, fill = Label)) +
+  geom_density(alpha = 0.5) +
+  xlab("Intensity of m/z 200.1") +
+  ylab("Density") +
+  ggtitle("Distribution of m/z 200.1 Intensity by Class")+
+  theme_bw()+
+  xlim(0,1e6)
+
+
+
+```
+
+As a mass spectrometrist I know based on the intensity scale of these measurements that the intensities have not been normalized. To normalize the intensities I will divide the intensity of each m/z value by the median intensity for all m/z values in its observation. We can then plot the distribution of normalized intensities.
+
+```{r, Normalize intensities,echo=F,warning=F,results="hide"}
+class_labels<-t_data$Label
+t_data$Label<-NULL
+normalized_t_data<-sweep(t_data,MARGIN=1,FUN="/",STATS=rowMedians(as.matrix(t_data),na.rm = TRUE))
+normalized_t_data$Label<-class_labels
+```
+
+
+```{r, Plot normalized intensity distribution of m/z values, echo=T,results=T}
+
+ggplot(normalized_t_data, aes(x = `200.1/2926`, fill = Label)) +
+  geom_density(alpha = 0.5) +
+  xlab("Normalized Intensity of m/z 200.1") +
+  ylab("Density") +
+  ggtitle("Distribution of m/z 200.1 Intensity by Class")+
+  theme_bw()+
+  xlim(0,3)
+
+```
+
+With our tidy normalized data we can begin conducting our power analysis. To begin we need to calculate the effect size for each of our variables, which is essentially a measure of how different our variables are between the knockout and wild-type groups.
+
+```{r, Calculate effect size for our m/z values between groups and plot the distribution of effect sizes,warning=F}
+
+normalized_t_data$Label<-NULL
+
+
+feature.effect.sizes<-lapply(X=normalized_t_data,FUN=function(x) cohen.d(d=x, f=class_labels))
+effect.sizes<-lapply(feature.effect.sizes,function(x) x$estimate)
+effect.sizes<-unlist(effect.sizes)
+
+df<-data.frame(effect.sizes)
+
+ggplot(df, aes(x=abs(effect.sizes))) +
+  geom_histogram(aes(y=..density..), alpha=0.5,bins=50, fill="gray", color="black") +
+  geom_density(color="black",alpha=0.5) +
+  geom_vline(aes(xintercept=mean(abs(effect.sizes))), lty='dashed', size=1.5) +
+  annotate("text", x=0.8, y=1.1, label=paste0("Mean effect size of ", round(mean(abs(effect.sizes)),3)), 
+           hjust=0, size=4, fontface="bold") +
+  theme_bw() +
+  ylab("Density") +
+  xlab("Effect Size") +
+  xlim(-2,2)
+
+
+```
+
+After calculating an effect size for each of the 409 m/z values between groups and plotting the distribution of effect sizes we calculate a mean effect size of 0.736 between groups. Now that we have an effect size between groups we can estimate our sample size requirements to detect an effect if we were to undertake a project measuring these same variables in a larger cohort
+
+```{r, Plot sample size requirements for various effect sizes including our experimental mean effect size of 0.736}
+
+# Step 1: Calculate required sample sizes
+effect_sizes <- c(0.2, 0.5,0.736, 1) # example effect sizes
+required_samples <- sapply(effect_sizes, function(x) {
+  pwr.t.test(d = x, power = 0.8, sig.level = 0.05)$n
+})
+
+names(required_samples) <- c("Effect Size of 0.2", "Effect Size of 0.5", "Effect Size of 0.736", "Effect Size of 1")
+
+# Step 2: Create data frame with all combinations of number of samples and effect sizes
+samples <- seq(10, 250, by = 10) # example number of samples
+df <- expand.grid(samples = samples, effect_size = effect_sizes)
+
+# Step 3: Calculate power for each combination of number of samples and effect size
+df$power <- apply(df, 1, function(x) {
+  pwr.t.test(d = x["effect_size"], n = x["samples"], sig.level = 0.05)$power
+})
+
+# Step 4: Create ggplot object
+ggplot(df, aes(x = samples, y = power, color = factor(effect_size))) +
+  geom_line(size=1) +
+  labs(x = "Number of Samples Needed per Group", y = "Power", color = "Effect size")+
+  theme_bw()+
+  geom_hline(yintercept=0.80,lty="dashed",color="black",size=1)
+```
+
+For biomedical studies statistical power is generally held at 0.80 so to find the number of samples needed per class to detect a real effect between knockout and wild-type groups we need to find the intersection of the dashed line (Power=0.8) and the effect size traces.
+
+```{r, Table showing samples needed per group at power of 0.80 and significance level of 0.05}
+
+samples_needed<-data.frame(effect_sizes, required_samples)
+samples_needed$required_samples<-round(samples_needed$required_samples,digits=0)
+names(samples_needed)<-c("Effect Size","Samples needed per Group")
+htmlTable(samples_needed, css.cell = "padding-left: 3px; padding-right: 3px; text-align:center;", 
+          colWidths = "30px", align = "c", rnames = FALSE, 
+          caption = "", 
+          css.table = "width:100%; white-space: nowrap; overflow-x: auto;")
+
+```
+
+# With our experimental effect size of 0.736 we would need to analyze 30 samples per group to have an 80% chance of detecting a real effect (Power = 0.80)!
+
+
+
+
+
+
+
+
+
+
+
